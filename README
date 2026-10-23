@@ -1,68 +1,101 @@
-import os
-from pathlib import Path
+# Weather & Demographics Data Pipeline
 
-import requests
-import pandas as pd
-from google.cloud import bigquery
+An end-to-end data pipeline that pulls live weather data for 50 capital cities, merges it with global population data, loads it into Google BigQuery, transforms it with SQL, and visualizes it in an interactive Looker Studio dashboard.
 
-project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-if not project_id:
-    raise RuntimeError(
-        "Set GOOGLE_CLOUD_PROJECT to your Google Cloud project ID before running this script."
-    )
+## Architecture
 
-data_file = Path(__file__).resolve().parent.parent / "data" / "population.csv.xlsx"
-pop = pd.read_excel(data_file)
-print(pop.columns.tolist())
+```
+Open-Meteo API ──┐
+                 ├─► Python (pandas) ─► BigQuery table ─► SQL view ─► Looker Studio map
+population.csv ──┘   merge + clean      current_weather_stats   vw_hottest_large_countries
+```
 
-locations = pop.dropna(subset=["Latitude", "Longitude"]).head(50)
+## Tech Stack
 
-rows = []
-for _, loc in locations.iterrows():
-	url = (f"https://api.open-meteo.com/v1/forecast?latitude={loc['Latitude']}"
-		   f"&longitude={loc['Longitude']}&current_weather=true")
-	try:
-		r = requests.get(url, timeout=20)
-		r.raise_for_status()
-		cw = r.json()["current_weather"]
-		rows.append({"City": loc["City"],
-					 "Country": loc["Country"],
-					 "Temperature": cw["temperature"],
-					 "Windspeed": cw["windspeed"]})
-	except Exception as e:
-		print("Failed:", loc["Country"], e)
+- **Linux / Git Bash**: project setup and command-line workflow
+- **Git & GitHub**: version control with a feature-branch workflow
+- **Python** (`requests`, `pandas`): data collection, merging, cleaning
+- **Google Cloud Platform (BigQuery)**: cloud data warehouse
+- **SQL**: aggregation and logical view
+- **Looker Studio**: interactive dashboard
 
-weather = pd.DataFrame(rows)
-print(weather.head())
+## Project Structure
 
-merged = pd.merge(
-	weather,
-	pop[["City", "Country", "Population"]],
-	on=["City", "Country"],
-	how="inner",
-)
-print(merged.shape)
-print(merged.isnull().sum())
-merged = merged.dropna(subset=["Country", "Temperature", "Population"])
+```
+weather_pipeline/
+├── data/              # local CSV files (git-ignored)
+├── scripts/
+│   └── main.py        # full pipeline script
+├── .gitignore
+└── README.md
+```
 
-merged["Population"] = merged["Population"].astype("int64")
-merged["Temperature"] = merged["Temperature"].astype("float64")
+## What the Pipeline Does
 
-def categorize(t):
-    if t < 10:
-        return "Cold"
-    elif t < 25:
-        return "Mild"
-    return "Hot"
+1. **Extract:** calls the Open-Meteo API for current temperature and wind speed for 50 capital cities.
+2. **Merge:** joins the weather DataFrame with `population.csv` on the `Country` column.
+3. **Clean:** handles null values, enforces types (`Population` as int64, `Temperature` as float64), and adds `Temperature_F` and `Temperature_Category` (Cold / Mild / Hot).
+4. **Load:** writes the final DataFrame to BigQuery table `global_weather_data.current_weather_stats`.
+5. **Transform:** SQL view `vw_hottest_large_countries` returns the top 5 hottest countries with population above 10 million.
+6. **Visualize:** a Looker Studio dashboard with a geo map coloured by temperature and a dropdown filter by temperature category.
 
-merged["Temperature_Category"] = merged["Temperature"].apply(categorize)
-merged["Temperature_F"] = merged["Temperature"] * 9 / 5 + 32
-print(merged.dtypes)
-print(merged.head())
+## Temperature Categories
 
-client = bigquery.Client(project=project_id)
-table_id = f"{project_id}.global_weather_data.current_weather_stats"
-job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-job = client.load_table_from_dataframe(merged, table_id, job_config=job_config)
-job.result()
-print(f"Loaded {job.output_rows} rows into {table_id}")
+| Category | Rule |
+|---|---|
+| Cold | below 10 °C |
+| Mild | 10 °C to below 25 °C |
+| Hot | 25 °C and above |
+
+## SQL View
+
+```sql
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.global_weather_data.vw_hottest_large_countries` AS
+SELECT Country,
+       MAX(Temperature) AS Temperature,
+       MAX(Population) AS Population,
+       MAX(Temperature_Category) AS Temperature_Category
+FROM `YOUR_PROJECT_ID.global_weather_data.current_weather_stats`
+WHERE Population > 10000000
+GROUP BY Country
+ORDER BY Temperature DESC
+LIMIT 5;
+```
+
+## How to Run
+
+1. Clone the repo and enter the folder:
+   ```bash
+   git clone YOUR_REPO_URL
+   cd weather_pipeline
+   ```
+2. Create a virtual environment and install dependencies:
+   ```bash
+   python -m venv venv
+   source venv/Scripts/activate   # Mac/Linux: source venv/bin/activate
+   pip install requests pandas google-cloud-bigquery pyarrow db-dtypes
+   ```
+3. Download the population dataset and save it as `data/population.csv`.
+4. Create a GCP project, enable the BigQuery API, create a service account with the BigQuery Admin role, and save its JSON key as `scripts/gcp-key.json`.
+5. Create a BigQuery dataset named `global_weather_data`.
+6. Set `PROJECT_ID` in `scripts/main.py` to your GCP project ID.
+7. Run the pipeline:
+   ```bash
+   python scripts/main.py
+   ```
+
+## Security
+
+`gcp-key.json`, `.env`, `data/`, and `venv/` are listed in `.gitignore`. No credentials are stored in this repository.
+
+## Git Workflow
+
+Development was done on the `feature/data-ingestion` branch with separate commits for API fetching, merging, cleaning, and BigQuery loading, then merged into `main`.
+
+## Dashboard
+
+Looker Studio dashboard: YOUR_LOOKER_STUDIO_SHARE_LINK
+
+## Author
+
+YOUR NAME
